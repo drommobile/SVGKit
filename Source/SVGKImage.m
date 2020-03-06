@@ -26,6 +26,8 @@
 #endif
 
 #if ENABLE_GLOBAL_IMAGE_CACHE_FOR_SVGKIMAGE_IMAGE_NAMED
+#import <pthread.h>
+
 @interface SVGKImageCacheLine : NSObject
 @property(nonatomic) int numberOfInstances;
 @property(nonatomic,strong) SVGKImage* mainInstance;
@@ -68,12 +70,14 @@
 #if ENABLE_GLOBAL_IMAGE_CACHE_FOR_SVGKIMAGE_IMAGE_NAMED
 @synthesize nameUsedToInstantiate = _nameUsedToInstantiate;
 static NSMutableDictionary* globalSVGKImageCache;
+static pthread_rwlock_t imageCacheLock;
 
 #pragma mark - Respond to low-memory warnings by dumping the global static cache
 +(void) initialize
 {
 	if( self == [SVGKImage class]) // Have to protect against subclasses ADDITIONALLY calling this, as a "[super initialize] line
 	{
+		pthread_rwlock_init(&imageCacheLock, NULL);
 #if SVGKIT_UIKIT
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didReceiveMemoryWarningOrBackgroundNotification:) name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didReceiveMemoryWarningOrBackgroundNotification:) name:UIApplicationDidEnterBackgroundNotification object:nil];
@@ -82,11 +86,16 @@ static NSMutableDictionary* globalSVGKImageCache;
 }
 
 +(void) clearCache {
-	if ([globalSVGKImageCache count] == 0) return;
+	pthread_rwlock_rdlock(&imageCacheLock);
+	NSUInteger count = [globalSVGKImageCache count];
+	pthread_rwlock_unlock(&imageCacheLock);
+	if (count == 0) return;
 	
-	SVGKitLogWarn(@"[%@] Low-mem, background or api clear; purging cache of %lu SVGKImages...", self, (unsigned long)[globalSVGKImageCache count] );
-	
+	SVGKitLogWarn(@"[%@] Low-mem, background or api clear; purging cache of %lu SVGKImages...", self, (unsigned long)count );
+
+	pthread_rwlock_wrlock(&imageCacheLock);
 	[globalSVGKImageCache removeAllObjects]; // once they leave the cache, if they are no longer referred to, they should automatically dealloc
+	pthread_rwlock_unlock(&imageCacheLock);
 }
 
 +(void) didReceiveMemoryWarningOrBackgroundNotification:(NSNotification*) notification
@@ -115,12 +124,16 @@ static NSMutableDictionary* globalSVGKImageCache;
 {	
 #if ENABLE_GLOBAL_IMAGE_CACHE_FOR_SVGKIMAGE_IMAGE_NAMED
     NSString* cacheName = [key length] > 0 ? key : name;
+	pthread_rwlock_wrlock(&imageCacheLock);
     if( globalSVGKImageCache == nil )
     {
         globalSVGKImageCache = [NSMutableDictionary new];
     }
-    
+	pthread_rwlock_unlock(&imageCacheLock);
+
+	pthread_rwlock_rdlock(&imageCacheLock);
     SVGKImageCacheLine* cacheLine = [globalSVGKImageCache valueForKey:cacheName];
+	pthread_rwlock_unlock(&imageCacheLock);
     if( cacheLine != nil )
     {
         cacheLine.numberOfInstances ++;
@@ -143,8 +156,10 @@ static NSMutableDictionary* globalSVGKImageCache;
     
     SVGKImageCacheLine* newCacheLine = [[SVGKImageCacheLine alloc] init];
     newCacheLine.mainInstance = result;
-    
+
+	pthread_rwlock_wrlock(&imageCacheLock);
     [globalSVGKImageCache setValue:newCacheLine forKey:cacheName];
+	pthread_rwlock_unlock(&imageCacheLock);
 	}
 	else
 	{
@@ -163,12 +178,16 @@ static NSMutableDictionary* globalSVGKImageCache;
 +(SVGKParser *) imageWithSource:(SVGKSource *)source onCompletion:(SVGKImageAsynchronousLoadingDelegate)blockCompleted
 {	
 #if ENABLE_GLOBAL_IMAGE_CACHE_FOR_SVGKIMAGE_IMAGE_NAMED
+	pthread_rwlock_wrlock(&imageCacheLock);
     if( globalSVGKImageCache == nil )
     {
         globalSVGKImageCache = [NSMutableDictionary new];
     }
-    
+	pthread_rwlock_unlock(&imageCacheLock);
+
+	pthread_rwlock_rdlock(&imageCacheLock);
     SVGKImageCacheLine* cacheLine = [globalSVGKImageCache valueForKey:source.keyForAppleDictionaries];
+	pthread_rwlock_unlock(&imageCacheLock);
     if( cacheLine != nil )
     {
         cacheLine.numberOfInstances ++;
@@ -197,8 +216,10 @@ static NSMutableDictionary* globalSVGKImageCache;
 						   
 						   SVGKImageCacheLine* newCacheLine = [[SVGKImageCacheLine alloc] init];
 						   newCacheLine.mainInstance = finalImage;
-						   
+
+						   pthread_rwlock_wrlock(&imageCacheLock);
 						   [globalSVGKImageCache setValue:newCacheLine forKey:source.keyForAppleDictionaries];
+						   pthread_rwlock_unlock(&imageCacheLock);
 					   }
 					   else
 					   {
@@ -361,12 +382,16 @@ static NSMutableDictionary* globalSVGKImageCache;
 #if ENABLE_GLOBAL_IMAGE_CACHE_FOR_SVGKIMAGE_IMAGE_NAMED
     if( self->cameFromGlobalCache )
     {
+		pthread_rwlock_rdlock(&imageCacheLock);
         SVGKImageCacheLine* cacheLine = [globalSVGKImageCache valueForKey:self.nameUsedToInstantiate];
+		pthread_rwlock_unlock(&imageCacheLock);
         cacheLine.numberOfInstances --;
-        
+
         if( cacheLine.numberOfInstances < 1 )
         {
+			pthread_rwlock_wrlock(&imageCacheLock);
             [globalSVGKImageCache removeObjectForKey:self.nameUsedToInstantiate];
+			pthread_rwlock_unlock(&imageCacheLock);
         }
     }
 #endif
